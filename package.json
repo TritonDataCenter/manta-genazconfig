@@ -1,0 +1,26 @@
+{
+	"name": "manta-genazconfig",
+	"description": "generate Manta configurations based on hardware inventory",
+	"version": "0.0.0",
+	"private": "true",
+	"bin": {
+	    "mgenazconfig": "./bin/mgenazconfig.js"
+	},
+
+	"repository": {
+		"type": "git",
+		"url": "git://github.com/joyent/manta-genazconfig.git"
+	},
+	"dependencies": {
+		"assert-plus": "1.0.0",
+		"cmdutil": "^1.1.0",
+		"jsprim": "^1.4.0",
+		"lomstream": "^1.1.0",
+		"mkdirp": "0.5.1",
+		"posix-getopt": "^1.2.0",
+		"vasync": "^1.6.4",
+		"verror": "^1.9.0"
+	},
+
+	"license": "MPL-2.0"
+}
