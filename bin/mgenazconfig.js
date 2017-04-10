@@ -17,6 +17,7 @@
 
 var mod_assertplus = require('assert-plus');
 var mod_cmdutil = require('cmdutil');
+var mod_extsprintf = require('extsprintf');
 var mod_fs = require('fs');
 var mod_getopt = require('posix-getopt');
 var mod_jsprim = require('jsprim');
@@ -263,46 +264,15 @@ function mgCmdFetchInventory(mgopts, callback)
 
 	funcs.push(mgPromptPassword);
 
-	funcs.push(function mgInventoryFetchDevices(_, subcallback) {
-		var building, devices, stream;
-
-		building = mgopts.mgo_config_region.azs[0].d42building;
-		devices = [];
-		stream = mod_device42.d42FetchRawDeviceDetails({
-		    'url': mgopts.mgo_config.device42.url,
-		    'username': mgopts.mgo_config.device42.username,
-		    'password': mgopts.mgo_password,
-		    'queryparams': {
-		        'building': mgopts.mgo_config_region.azs[0].d42building
-		    }
-		});
-
-		stream.on('data', function (obj) {
-			devices.push(obj);
-		});
-
-		stream.on('error', function (err) {
-			err = new VError(err, 'fetching devices');
-			subcallback(err);
-		});
-
-		stream.on('end', function () {
-			if (devices.length === 0) {
-				subcallback(new VError(
-				    'no devices found in building "%s"',
-				    building));
-				return;
-			}
-
-			mod_fs.writeFile(outfile, JSON.stringify(devices),
-			    function (err) {
-				if (err) {
-					err = new VError(err,
-					    'write "%s"', outfile);
-				}
-
-				subcallback(err);
-			    });
+	mgopts.mgo_config_region.azs.forEach(function (az) {
+		funcs.push(function mgInventoryFetchOne(_, subcallback) {
+			outfile = mod_path.join(invroot,
+			    'devices-' + az.d42building + '.json');
+			mgInventoryFetchDevices({
+			    'mgopts': mgopts,
+			    'outfile': outfile,
+			    'building': az.d42building
+			}, subcallback);
 		});
 	});
 
@@ -342,11 +312,78 @@ function mgPromptPassword(mgopts, callback)
 	iface.question(label, function (answer) {
 		process.stdin.setRawMode(false);
 		mgopts.mgo_password = answer;
+		process.stderr.write('\n');
 		iface.close();
 		callback();
 	});
 
 	process.stdin.setRawMode(true);
+}
+
+function mgInventoryFetchDevices(args, callback)
+{
+	var mgopts, building, outfile, devices, stream;
+
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.object(args.mgopts, 'args.mgopts');
+	mod_assertplus.string(args.outfile, 'args.outfile');
+	mod_assertplus.string(args.building, 'args.building');
+
+	mgopts = args.mgopts;
+	building = args.building;
+	outfile = args.outfile;
+	devices = [];
+
+	log_start('fetching device42 devices for building %s', building);
+	stream = mod_device42.d42FetchRawDeviceDetails({
+	    'url': mgopts.mgo_config.device42.url,
+	    'username': mgopts.mgo_config.device42.username,
+	    'password': mgopts.mgo_password,
+	    'queryparams': {
+	        'building': building
+	    }
+	});
+
+	stream.on('data', function (obj) {
+		devices.push(obj);
+	});
+
+	stream.on('error', function (err) {
+		err = new VError(err, 'fetching devices');
+		callback(err);
+	});
+
+	stream.on('end', function () {
+		if (devices.length === 0) {
+			callback(new VError(
+			    'no devices found in building "%s"',
+			    building));
+			return;
+		}
+
+		mod_fs.writeFile(outfile, JSON.stringify(devices),
+		    function (err) {
+			if (err) {
+				err = new VError(err,
+				    'write "%s"', outfile);
+			} else {
+				log_done();
+			}
+
+			callback(err);
+		    });
+	});
+}
+
+function log_start()
+{
+	var str = mod_extsprintf.sprintf.apply(null, arguments);
+	process.stderr.write(new Date().toISOString() + ': ' + str + ' ... ');
+}
+
+function log_done()
+{
+	console.error('done.');
 }
 
 main();
