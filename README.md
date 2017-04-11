@@ -37,8 +37,8 @@ This tool itself has a configuration file that describes:
   of rack names in the Device42 database that should be part of this Manta
   deployment
 
-Here's an example configuration file for a single, three-AZ Manta deployment
-using two racks' worth of servers per DC:
+Here's an example configuration file for a single, eight-shard, three-AZ Manta
+deployment using two racks' worth of servers per DC:
 
     {
         "device42": {
@@ -47,6 +47,7 @@ using two racks' worth of servers per DC:
 	},
 	"regions": {
 	    "myregion": {
+		"nshards": 8,
 		"azs": [ {
 		    "name": "myregion-az1",
 		    "d42building": "MY_REGION_ONE",

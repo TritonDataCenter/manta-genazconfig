@@ -28,7 +28,10 @@ var mod_stream = require('stream');
 var mod_vasync = require('vasync');
 var VError = require('verror');
 
+var printf = mod_extsprintf.printf;
+
 var mod_device42 = require('../lib/device42');
+var mod_schema = require('../lib/schema');
 
 /* Subcommands */
 var mgCmds = {
@@ -40,83 +43,12 @@ var mgCmds = {
 var mgGlobalOptStr = 'c:(config-file)d:(data-dir)';
 
 /*
- * Configuration file schema
+ * Defines how to determine the type of server from its hardware type.  This
+ * should really be part of the configuration file.
  */
-var mgConfigSchema = {
-    'type': 'object',
-    'additionalProperties': false,
-    'properties': {
-	'device42': {
-	    'type': 'object',
-	    'required': true,
-	    'additionalProperties': 'false',
-	    'properties': {
-		'url': {
-		    'type': 'string',
-		    'required': true,
-		    'minLength': 1
-		},
-		'username': {
-		    'type': 'string',
-		    'required': true,
-		    'minLength': 1
-		}
-	    }
-	},
-
-	'regions': {
-	    'type': 'object',
-	    'required': true
-	}
-    }
-};
-
-/*
- * If JSON schema v3 supports specifying schemas for values inside an object
- * whose properties themselves are not known ahead of time, the author cannot
- * find it.  Instead, we explicitly check each of the region objects with this
- * schema.
- */
-var mgConfigSchemaRegion = {
-    'type': 'object',
-    'additionalProperties': false,
-    'properties': {
-	'azs': {
-	    'type': 'array',
-	    'required': true,
-	    'minItems': 1,
-	    'maxItems': 3,
-	    'items': {
-		'type': 'object',
-		'additionalProperties': false,
-		'properties': {
-		    'name': {
-		        'type': 'string',
-			'required': true,
-			'minLength': 1
-		    },
-		    'd42building': {
-		        'type': 'string',
-			'required': true,
-			'minLength': 1
-		    },
-		    'cnapi': {
-		        'type': 'string',
-			'minLength': 1
-		    },
-		    'd42racks': {
-		        'type': 'array',
-			'required': true,
-			'minItems': 1,
-			'items': {
-			    'type': 'string',
-			    'minLength': 1
-			}
-		    }
-		}
-	    }
-	}
-    }
+var mgHardwareToServerType = {
+    'Joyent-Compute-Platform-3301': 'metadata',
+    'Joyent-Storage-Platform-7001': 'storage'
 };
 
 function main()
@@ -134,6 +66,7 @@ function main()
 	    'mgo_data_dir': mod_path.join('.', 'mgenazconfig_data'),
 	    'mgo_config': null,
 	    'mgo_config_region': null,
+	    'mgo_region_name': null,
 	    'mgo_password': null,
 	    'mgo_devices_by_az': null
 	};
@@ -175,7 +108,7 @@ function main()
 	}
 	mgopts.mgo_cmd = args.shift();
 	mgopts.mgo_cmdargs = args;
-	if (!mgCmds.hasOwnProperty(mgopts.mgo_cmd)) {
+	if (!mod_jsprim.hasKey(mgCmds, mgopts.mgo_cmd)) {
 		mod_cmdutil.usage('unsupported subcommand: "%s"',
 		    mgopts.mgo_cmd);
 	}
@@ -224,7 +157,8 @@ function mgConfigRead(mgopts, callback)
 			return;
 		}
 
-		err = mod_jsprim.validateJsonObject(mgConfigSchema, parsed);
+		err = mod_jsprim.validateJsonObject(
+		    mod_schema.mgSchemaConfig, parsed);
 		if (err) {
 			callback(new VError(err, 'validate "%s"',
 			    mgopts.mgo_config_file));
@@ -234,7 +168,7 @@ function mgConfigRead(mgopts, callback)
 		for (regionName in parsed.regions) {
 			region = parsed.regions[regionName];
 			err = mod_jsprim.validateJsonObject(
-			    mgConfigSchemaRegion, region);
+			    mod_schema.mgSchemaConfigRegion, region);
 			if (err) {
 				callback(new VError(err,
 				    'validate "%s": region "%s"',
@@ -265,11 +199,12 @@ function mgCmdFetchInventory(mgopts, callback)
 	}
 
 	regionName = mgopts.mgo_cmdargs[0];
-	if (!mgopts.mgo_config.regions.hasOwnProperty(regionName)) {
+	if (!mod_jsprim.hasKey(mgopts.mgo_config.regions, regionName)) {
 		callback(new VError('unknown region: "%s"', regionName));
 		return;
 	}
 
+	mgopts.mgo_region_name = regionName;
 	mgopts.mgo_config_region = mgopts.mgo_config.regions[regionName];
 
 	funcs = [];
@@ -421,11 +356,12 @@ function mgCmdGenManta(mgopts, callback)
 	}
 
 	regionName = mgopts.mgo_cmdargs[0];
-	if (!mgopts.mgo_config.regions.hasOwnProperty(regionName)) {
+	if (!mod_jsprim.hasKey(mgopts.mgo_config.regions, regionName)) {
 		callback(new VError('unknown region: "%s"', regionName));
 		return;
 	}
 
+	mgopts.mgo_region_name = regionName;
 	mgopts.mgo_config_region = mgopts.mgo_config.regions[regionName];
 
 	dir = mod_path.join(mgopts.mgo_data_dir, 'inventory', regionName);
@@ -494,11 +430,19 @@ function mgFindLatestComplete(args, callback)
 				return;
 			}
 
-			/* XXX schema verify */
-			/* XXX first-class objects */
+			err = mod_jsprim.validateJsonObject(
+			    mod_schema.mgSchemaD42DeviceList, parsed);
+			if (err) {
+				subcallback(new VError(err,
+				    'validate "%s"', filepath));
+				return;
+			}
+
 			subcallback(null, {
 			    'az': az.name,
-			    'devices': parsed
+			    'devices': parsed.map(function (p) {
+				return (new mod_device42.D42Device(p));
+			    })
 			});
 		});
 	    }
@@ -526,12 +470,156 @@ function mgFindLatestComplete(args, callback)
 
 function mgGenManta(mgopts, callback)
 {
+	var rv, counters, comparators, outfile;
+
 	/*
-	 * XXX working here:
-	 * - do actual genmanta work
-	 * - compare to spc-manta-genazconfig
+	 * XXX compare to spc-manta-genazconfig
 	 */
-	setImmediate(callback, new VError('not yet implemented: mgGenManta'));
+	rv = {};
+	rv.nshards = mgopts.mgo_config_region.nshards;
+	rv.servers = [];
+
+	counters = {
+	    'nUnknownHw': 0,
+	    'nUnknownRack': 0,
+	    'nMetadata': 0,
+	    'nStorage': 0
+	};
+
+	mgopts.mgo_config_region.azs.forEach(function (az) {
+		var azrackname, racks, azdevices;
+		var nmetadata, nstorage;
+
+		/*
+		 * Build up a set of allowed rack identifiers to quickly rule
+		 * out servers that aren't in racks assigned to Manta.  The
+		 * values in "racks" describe the count of servers of each type
+		 * that we found in each rack.
+		 */
+		racks = {};
+		az.d42racks.forEach(function (r) {
+			racks[r] = {
+			    'nrMetadata': 0,
+			    'nrStorage': 0
+			};
+		});
+
+		nmetadata = 0;
+		nstorage = 0;
+
+		azdevices = mgopts.mgo_devices_by_az[az.name];
+		mod_assertplus.object(azdevices);
+
+		azdevices.forEach(function (device) {
+			var rack, devtype;
+
+			/*
+			 * We got this list by querying Device 42 for devices in
+			 * this building.  We should validate this earlier, but
+			 * it would be strange if we got a device in a different
+			 * building.
+			 */
+			mod_assertplus.equal(
+			    device.d42d_building, az.d42building);
+			if (!mod_jsprim.hasKey(racks, device.d42d_rack)) {
+				counters['nUnknownRack']++;
+				return;
+			}
+
+			if (!mod_jsprim.hasKey(mgHardwareToServerType,
+			    device.d42d_hardware)) {
+				counters['nUnknownHw']++;
+				return;
+			}
+
+			rack = racks[device.d42d_rack];
+			devtype = mgHardwareToServerType[device.d42d_hardware];
+			if (devtype == 'storage') {
+				nstorage++;
+				counters['nStorage']++;
+				rack['nrStorage']++;
+			} else {
+				mod_assertplus.equal(devtype, 'metadata');
+				nmetadata++;
+				counters['nMetadata']++;
+				rack['nrMetadata']++;
+			}
+
+			/*
+			 * XXX uuid should be the real uuid, but they're not in
+			 * Device42 yet.
+			 * XXX would like to include real memory number.
+			 * XXX add cross-check: no serials used more than once
+			 */
+			azrackname = az.name + '_' + device.d42d_rack;
+			rv.servers.push({
+			    'type': devtype,
+			    'uuid': device.d42d_serial,
+			    'az': az.name,
+			    'rack': azrackname,
+			    'memory': 64
+			});
+		});
+
+		/*
+		 * Print out a short report of the counts of servers for each
+		 * rack in this AZ.
+		 */
+		printf('AZ %s (%d racks):\n\n', az.name, az.d42racks.length);
+		printf('    %-10s  %9s  %9s\n',
+		    'RACK', 'NMETADATA', 'NSTORAGE');
+		az.d42racks.forEach(function (rackname) {
+			printf('    %-10s  %9s  %9s\n', rackname,
+			    racks[rackname].nrMetadata,
+			    racks[rackname].nrStorage);
+		});
+		printf('    %-10s  %9s  %9s\n\n', 'TOTAL', nmetadata, nstorage);
+	});
+
+	printf('%-14s  %9d  %9d\n\n', 'ALL AZS', counters['nMetadata'],
+	    counters['nStorage']);
+	printf('%-38s  %5d\n', 'total Manta servers',
+	    counters['nStorage'] + counters['nMetadata']);
+	printf('%-38s  %5d\n', 'ignored: servers in non-Manta racks',
+	    counters['nUnknownRack']);
+	printf('%-38s  %5d\n', 'ignored: servers on non-Manta hardware',
+	    counters['nUnknownHw']);
+
+	/*
+	 * Sort the output for human-readability and for determinism (which
+	 * makes testing easier).
+	 */
+	comparators = [ 'az', 'rack', 'type', 'uuid' ];
+	rv.servers.sort(function (s1, s2) {
+		var i, sort;
+
+		for (i = 0; i < comparators.length; i++) {
+			sort = s1[comparators[i]].localeCompare(
+			    s2[comparators[i]]);
+			if (sort !== 0) {
+				return (sort);
+			}
+		}
+
+		return (0);
+	});
+
+	outfile = mgopts.mgo_region_name + '.json';
+	mod_fs.writeFile(outfile, JSON.stringify(rv), {
+	    'flag': 'wx'
+	}, function onOutputWriteDone(err) {
+		if (err) {
+			if (err.code == 'EEXIST') {
+				err = new VError('file already exists');
+			}
+
+			callback(new VError(err, 'write "%s"', outfile));
+			return;
+		}
+
+		console.log('wrote %s', outfile);
+		callback();
+	});
 }
 
 function log_start()
