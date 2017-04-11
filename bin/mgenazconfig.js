@@ -28,6 +28,7 @@ var mod_stream = require('stream');
 var mod_vasync = require('vasync');
 var VError = require('verror');
 
+var fprintf = mod_extsprintf.fprintf;
 var printf = mod_extsprintf.printf;
 
 var mod_device42 = require('../lib/device42');
@@ -470,20 +471,22 @@ function mgFindLatestComplete(args, callback)
 
 function mgGenManta(mgopts, callback)
 {
-	var rv, counters, comparators, outfile;
+	var rv, counters;
+	var usedSerials, errors, warnings;
 
-	/*
-	 * XXX compare to spc-manta-genazconfig
-	 */
 	rv = {};
 	rv.nshards = mgopts.mgo_config_region.nshards;
 	rv.servers = [];
 
+	errors = [];
+	usedSerials = {};
 	counters = {
 	    'nUnknownHw': 0,
 	    'nUnknownRack': 0,
 	    'nMetadata': 0,
-	    'nStorage': 0
+	    'nStorage': 0,
+	    'nMissingUuid': 0,
+	    'nMissingRam': 0
 	};
 
 	mgopts.mgo_config_region.azs.forEach(function (az) {
@@ -511,7 +514,7 @@ function mgGenManta(mgopts, callback)
 		mod_assertplus.object(azdevices);
 
 		azdevices.forEach(function (device) {
-			var rack, devtype;
+			var rack, devtype, uuid, ram;
 
 			/*
 			 * We got this list by querying Device 42 for devices in
@@ -546,18 +549,57 @@ function mgGenManta(mgopts, callback)
 			}
 
 			/*
-			 * XXX uuid should be the real uuid, but they're not in
-			 * Device42 yet.
-			 * XXX would like to include real memory number.
-			 * XXX add cross-check: no serials used more than once
+			 * By deployment-time, the Device 42 data should have
+			 * server uuid, and we can use that to generate the
+			 * configuration file.  It's useful to use this tool
+			 * before then, when we don't have uuids assigned yet,
+			 * in order to validate that we'll have a useful
+			 * configuration.  If we have a server uuid, we'll use
+			 * it here, and otherwise we'll insert the server's
+			 * serial number.  If we fall back to the serial, we'll
+			 * make a note and let the user know that this
+			 * configuration won't be directly usable.
 			 */
+			if (device.d42d_uuid === null) {
+				uuid = device.d42d_serial;
+				counters['nMissingUuid']++;
+			} else {
+				uuid = device.d42d_uuid;
+			}
+
+			/*
+			 * The same applies for memory, except that we apply a
+			 * default of 64GB when we don't know better.  That's
+			 * chosen primarily because it corresponds with the
+			 * number of compute zones we intend to deploy to
+			 * storage nodes in new deployments, and that's the only
+			 * thing this value is currently used for anyway.
+			 */
+			if (device.d42d_ramgb === null) {
+				ram = 64;
+				counters['nMissingRam']++;
+			} else {
+				ram = device.d42d_ramgb;
+			}
+
+			if (mod_jsprim.hasKey(
+			    usedSerials, device.d42d_serial)) {
+				errors.push(new VError(
+				    'server having serial "%s" appeared ' +
+				    'more than once (device_id %s and %s)',
+				    usedSerials[device.d42d_serial].d42d_devid,
+				    device.d42d_devid));
+				return;
+			}
+
+			usedSerials[device.d42d_serial] = device;
 			azrackname = az.name + '_' + device.d42d_rack;
 			rv.servers.push({
 			    'type': devtype,
-			    'uuid': device.d42d_serial,
+			    'uuid': uuid,
 			    'az': az.name,
 			    'rack': azrackname,
-			    'memory': 64
+			    'memory': ram
 			});
 		});
 
@@ -576,6 +618,64 @@ function mgGenManta(mgopts, callback)
 		printf('    %-10s  %9s  %9s\n\n', 'TOTAL', nmetadata, nstorage);
 	});
 
+	warnings = mgGenMantaCrossCheck(mgopts, rv, counters);
+	mgGenMantaSummarize(mgopts, warnings, counters);
+
+	/*
+	 * XXX want MultiErrorFromErrorArray that I have in sdc-manta-amon
+	 */
+	if (errors.length > 0) {
+		setImmediate(callback, new VError.MultiError(errors));
+		return;
+	}
+
+	mgGenMantaFinish(mgopts, rv, callback);
+}
+
+/*
+ * Run additional cross-checks using whatever data we have.  Returns an array of
+ * warnings.
+ */
+function mgGenMantaCrossCheck(mgopts, result, counters)
+{
+	var warnings = [];
+
+	if (counters['nMissingUuid'] > 0) {
+		warnings.push(new VError('Some servers are missing a ' +
+		    '"uuid" property.  Serial numbers have been used in the ' +
+		    'output file instead of uuids.  The resulting output ' +
+		    'file cannot be directly used for deployment, but it ' +
+		    'can be used to verify the distribution of instances.'));
+	}
+
+	if (counters['nMissingRam'] > 0) {
+		warnings.push(new VError('Some servers are missing a ' +
+		    '"ram" property.  A default value has been used.'));
+	}
+
+	/*
+	 * XXX cross-checks:
+	 * - Device42 DRAM is the same for all metadata nodes
+	 * - Device42 DRAM is the same for all storage nodes
+	 * - Device42 BMC MAC OUI is the same for all metadata nodes
+	 * - Device42 BMC MAC OUI is the same for all storage nodes
+	 * - Device42 hostnames match what we expect given serials
+	 *
+	 * - warn about not having Triton data for additional checks
+	 *
+	 * With Triton data:
+	 * - Device42 hostname, uuid, serial, dram matches same fields in Triton
+	 * - Headnode not used
+	 * - All used servers are reserved
+	 */
+	return (warnings);
+}
+
+/*
+ * Print out a summary of the generated config.
+ */
+function mgGenMantaSummarize(mgopts, warnings, counters)
+{
 	printf('%-14s  %9d  %9d\n\n', 'ALL AZS', counters['nMetadata'],
 	    counters['nStorage']);
 	printf('%-38s  %5d\n', 'total Manta servers',
@@ -585,12 +685,41 @@ function mgGenManta(mgopts, callback)
 	printf('%-38s  %5d\n', 'ignored: servers on non-Manta hardware',
 	    counters['nUnknownHw']);
 
+	printf('%-38s  %5d\n', 'servers with unknown "ram"',
+	    counters['nMissingRam']);
+	printf('%-38s  %5d\n', 'servers with unknown "uuid"',
+	    counters['nMissingUuid']);
+
+	if (warnings.length > 0) {
+		printf('\n');
+		warnings.forEach(function (w) {
+			mod_cmdutil.warn(w);
+			fprintf(process.stderr, '\n');
+		});
+	}
+}
+
+/*
+ * Given an object representing the final output content, format it and write it
+ * to an appropriate output file.
+ */
+function mgGenMantaFinish(mgopts, result, callback)
+{
+	var outfile, comparators;
+
+	mod_assertplus.object(mgopts, 'mgopts');
+	mod_assertplus.object(result, 'result');
+	mod_assertplus.func(callback, 'callback');
+
 	/*
 	 * Sort the output for human-readability and for determinism (which
 	 * makes testing easier).
 	 */
 	comparators = [ 'az', 'rack', 'type', 'uuid' ];
-	rv.servers.sort(function (s1, s2) {
+	result.servers.sort(function (s1, s2) {
+		/*
+		 * TODO jsprim should probably provide this sort function.
+		 */
 		var i, sort;
 
 		for (i = 0; i < comparators.length; i++) {
@@ -605,9 +734,8 @@ function mgGenManta(mgopts, callback)
 	});
 
 	outfile = mgopts.mgo_region_name + '.json';
-	mod_fs.writeFile(outfile, JSON.stringify(rv), {
-	    'flag': 'wx'
-	}, function onOutputWriteDone(err) {
+	mod_fs.writeFile(outfile, JSON.stringify(result), { 'flag': 'wx' },
+	    function onOutputWriteDone(err) {
 		if (err) {
 			if (err.code == 'EEXIST') {
 				err = new VError('file already exists');
@@ -619,7 +747,7 @@ function mgGenManta(mgopts, callback)
 
 		console.log('wrote %s', outfile);
 		callback();
-	});
+	    });
 }
 
 function log_start()

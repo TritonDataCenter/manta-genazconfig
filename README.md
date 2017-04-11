@@ -125,5 +125,5 @@ Now, run cross-checks:
   same amount of DRAM.
 * Relatedly, the tool should support cross-checks for the data in Device42: that
   serial numbers match hostnames in the way we expect.
-* Relateldy, the tool should cross-check the Device42 data with the Triton data,
+* Relatedly, the tool should cross-check the Device42 data with the Triton data,
   ensuring that servers have the expected uuids, hostnames, and serial numbers.
