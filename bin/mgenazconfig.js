@@ -45,6 +45,14 @@ var mgCmds = {
 var mgGlobalOptStr = 'c:(config-file)d:(data-dir)';
 
 /*
+ * Hostname prefixes for each type of server.  This is used as a sanity-check.
+ */
+var mgHostnamePrefix = {
+    'metadata': 'HA',
+    'storage': 'MS'
+};
+
+/*
  * Defines how to determine the type of server from its hardware type.  This
  * should really be part of the configuration file.
  */
@@ -369,7 +377,13 @@ function mgCmdGenManta(mgopts, callback)
 	dir = mod_path.join(mgopts.mgo_data_dir, 'inventory', regionName);
 	mod_fs.readdir(dir, function (err, entries) {
 		if (err) {
-			callback(new VError(err, 'list "%s"', dir));
+			if (err.code == 'ENOENT') {
+				err = new VError('no inventory found in ' +
+				    '"%s"', dir);
+			} else {
+				err = new VError(err, 'list "%s"', dir);
+			}
+			callback(err);
 			return;
 		}
 
@@ -492,7 +506,9 @@ function mgGenManta(mgopts, callback)
 	    'nMetadata': 0,
 	    'nStorage': 0,
 	    'nMissingUuid': 0,
-	    'nMissingRam': 0
+	    'nMissingRam': 0,
+	    'nUnsetupName': 0,
+	    'nWrongName': 0
 	};
 
 	mgopts.mgo_config_region.azs.forEach(function (az) {
@@ -520,7 +536,7 @@ function mgGenManta(mgopts, callback)
 		mod_assertplus.object(azdevices);
 
 		azdevices.forEach(function (device) {
-			var rack, devtype, uuid, ram;
+			var rack, devtype, uuid, ram, hnprefix;
 
 			/*
 			 * We got this list by querying Device 42 for devices in
@@ -535,7 +551,8 @@ function mgGenManta(mgopts, callback)
 				return;
 			}
 
-			if (!mod_jsprim.hasKey(mgHardwareToServerType,
+			if (device.d42d_hardware === null ||
+			    !mod_jsprim.hasKey(mgHardwareToServerType,
 			    device.d42d_hardware)) {
 				counters['nUnknownHw']++;
 				return;
@@ -588,6 +605,30 @@ function mgGenManta(mgopts, callback)
 				ram = device.d42d_ramgb;
 			}
 
+			/*
+			 * Before setup, the hostname typically matches the
+			 * serial number.  After, that it should have one of our
+			 * expected prefixes, followed by trailing characters of
+			 * the serial number.  Identify these special case so
+			 * that we can emit warnings.
+			 */
+			if (device.d42d_name == device.d42d_serial) {
+				counters['nUnsetupName']++;
+			} else {
+				hnprefix = mgHostnamePrefix[devtype];
+				if (!mod_jsprim.startsWith(
+				    device.d42d_name, hnprefix) ||
+				    !mod_jsprim.endsWith(
+				    device.d42d_serial,
+				    device.d42d_name.substr(hnprefix.length))) {
+					counters['nWrongName']++;
+				}
+			}
+
+			/*
+			 * Make sure we don't try to assign the same server
+			 * twice.
+			 */
 			if (mod_jsprim.hasKey(
 			    usedSerials, device.d42d_serial)) {
 				errors.push(new VError(
@@ -661,6 +702,17 @@ function mgGenMantaCrossCheck(mgopts, result, counters)
 		    '"ram" property.  A default value has been used.'));
 	}
 
+	if (counters['nUnsetupName'] > 0) {
+		warnings.push(new VError('Some servers have a hostname ' +
+		    'that exactly matches the serial number.  This usually ' +
+		    'indicates that they have not yet been set up.'));
+	}
+
+	if (counters['nWrongName'] > 0) {
+		warnings.push(new VError('Some servers hostnames do not ' +
+		    'match the expected form.'));
+	}
+
 	/*
 	 * Count distinct configurations for each type of server.  Emit a
 	 * warning if there are more than one.  For now, a configuration is just
@@ -671,10 +723,6 @@ function mgGenMantaCrossCheck(mgopts, result, counters)
 	 * We track this with a simple structure that maps:
 	 *
 	 *     server type ("storage" or "metadata") -> DRAM -> count
-	 *
-	 * TODO add BMC MAC OUI.  This requires data to be present in Device42.
-	 * TODO check hostnames against serial numbers.  This requires data to
-	 * be present in Device42.
 	 */
 	attrs = {
 	    'storage': {},
@@ -727,22 +775,26 @@ function mgGenMantaSummarize(mgopts, warnings, counters)
 	    counters['nStorage']);
 	printf('%-38s  %5d\n', 'total Manta servers',
 	    counters['nStorage'] + counters['nMetadata']);
-	printf('%-38s  %5d\n', 'ignored: servers in non-Manta racks',
+	printf('%-38s  %5d\n', 'ignored: devices in non-Manta racks',
 	    counters['nUnknownRack']);
-	printf('%-38s  %5d\n', 'ignored: servers on non-Manta hardware',
+	printf('%-38s  %5d\n', 'ignored: devices on non-Manta hardware',
 	    counters['nUnknownHw']);
 
 	printf('%-38s  %5d\n', 'servers with unknown "ram"',
 	    counters['nMissingRam']);
 	printf('%-38s  %5d\n', 'servers with unknown "uuid"',
 	    counters['nMissingUuid']);
+	printf('%-38s  %5d\n', 'servers with un-setup hostnames',
+	    counters['nUnsetupName']);
+	printf('%-38s  %5d\n', 'servers with unexpected hostnames',
+	    counters['nWrongName']);
 
 	if (warnings.length > 0) {
 		printf('\n');
 		warnings.forEach(function (w) {
-			mod_cmdutil.warn(w);
-			fprintf(process.stderr, '\n');
+			console.error('WARN: %s', w.message);
 		});
+		printf('\n');
 	}
 }
 
