@@ -30,6 +30,7 @@ var VError = require('verror');
 
 var fprintf = mod_extsprintf.fprintf;
 var printf = mod_extsprintf.printf;
+var sprintf = mod_extsprintf.sprintf;
 
 var mod_device42 = require('../lib/device42');
 var mod_schema = require('../lib/schema');
@@ -450,11 +451,16 @@ function mgFindLatestComplete(args, callback)
 	}, function (err, results) {
 		if (err) {
 			/*
-			 * XXX Consider whether we want this to invoke this
-			 * function again with one fewer path?  That was the
-			 * original idea, but it's not clear we want to walk
-			 * backwards -- the user might not realize it and we
-			 * might produce stale output.
+			 * Note: this function was written so that it would be
+			 * easy to walk backwards to previous snapshots in order
+			 * to find the last valid one.  But it's not clear we
+			 * want to do that here -- we could end up emitting
+			 * output based on stale input and the user wouldn't
+			 * notice.  So we just fail here.  If this becomes a
+			 * problem, we could at least provide a way for users to
+			 * specify specific snapshots, and we could consider
+			 * walking back to earlier valid snapshots and emitting
+			 * a warning when that's happened.
 			 */
 			callback(err);
 			return;
@@ -638,7 +644,9 @@ function mgGenManta(mgopts, callback)
  */
 function mgGenMantaCrossCheck(mgopts, result, counters)
 {
-	var warnings = [];
+	var warnings, attrs;
+
+	warnings = [];
 
 	if (counters['nMissingUuid'] > 0) {
 		warnings.push(new VError('Some servers are missing a ' +
@@ -654,20 +662,59 @@ function mgGenMantaCrossCheck(mgopts, result, counters)
 	}
 
 	/*
-	 * XXX cross-checks:
-	 * - Device42 DRAM is the same for all metadata nodes
-	 * - Device42 DRAM is the same for all storage nodes
-	 * - Device42 BMC MAC OUI is the same for all metadata nodes
-	 * - Device42 BMC MAC OUI is the same for all storage nodes
-	 * - Device42 hostnames match what we expect given serials
+	 * Count distinct configurations for each type of server.  Emit a
+	 * warning if there are more than one.  For now, a configuration is just
+	 * an amount of DRAM, but this could also include BMC MAC address OUIs
+	 * or other properties that we expect to be the same across all servers
+	 * of the same type.
 	 *
-	 * - warn about not having Triton data for additional checks
+	 * We track this with a simple structure that maps:
 	 *
-	 * With Triton data:
-	 * - Device42 hostname, uuid, serial, dram matches same fields in Triton
-	 * - Headnode not used
-	 * - All used servers are reserved
+	 *     server type ("storage" or "metadata") -> DRAM -> count
+	 *
+	 * TODO add BMC MAC OUI.  This requires data to be present in Device42.
+	 * TODO check hostnames against serial numbers.  This requires data to
+	 * be present in Device42.
 	 */
+	attrs = {
+	    'storage': {},
+	    'metadata': {}
+	};
+
+	result.servers.forEach(function (s) {
+		var type;
+
+		type = s.type;
+		if (!mod_jsprim.hasKey(attrs[type], s.memory.toString())) {
+			attrs[type][s.memory] = 0;
+		}
+
+		attrs[type][s.memory]++;
+	});
+
+	mod_jsprim.forEachKey(attrs, function (type, attr) {
+		var keys = Object.keys(attrs[type]);
+		if (keys.length <= 1) {
+			return;
+		}
+
+		warnings.push(new VError('found multiple different ' +
+		    '"%s" server configurations: %s', type,
+		    keys.map(function (k) {
+			return (sprintf('%d having ram "%s"',
+			    attrs[type][k], k));
+		    }).join(', ')));
+	});
+
+	/*
+	 * TODO implement Triton data source and cross-checks.
+	 * cross-checks:
+	 * - D42 and Triton match on hostname, uuid, serial, DRAM.
+	 * - headnode not used
+	 * - all used servers are reserved
+	 */
+	warnings.push(new VError('Triton data is not present.  Some cross-' +
+	    'checks have been skipped.'));
 	return (warnings);
 }
 
