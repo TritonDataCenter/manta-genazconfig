@@ -64,30 +64,30 @@ deployment using two racks' worth of servers per DC:
 
     {
         "device42": {
-	    "url": "https://d42.example.com",
-	    "username": "your_username"
-	},
-	"regions": {
-	    "myregion": {
-		"nshards": 8,
-		"azs": [ {
-		    "name": "myregion-az1",
-		    "d42building": "MY_REGION_ONE",
-		    "d42racks": [ "myrack01", "myrack02" ],
-		    "cnapi": "10.1.0.15"
-		}, {
-		    "name": "myregion-az2",
-		    "d42building": "MY_REGION_TWO",
-		    "d42racks": [ "myrack03", "myrack04" ],
-		    "cnapi": "10.2.0.15"
-		}, {
-		    "name": "myregion-az3",
-		    "d42building": "MY_REGION_THREE",
-		    "d42racks": [ "myrack05", "myrack06" ],
-		    "cnapi": "10.3.0.15"
-		} ]
-	    }
-	}
+            "url": "https://d42.example.com",
+            "username": "your_username"
+        },
+        "regions": {
+            "myregion": {
+                "nshards": 8,
+                "azs": [ {
+                    "name": "myregion-az1",
+                    "d42building": "MY_REGION_ONE",
+                    "d42racks": [ "myrack01", "myrack02" ],
+                    "cnapi": "10.1.0.15"
+                }, {
+                    "name": "myregion-az2",
+                    "d42building": "MY_REGION_TWO",
+                    "d42racks": [ "myrack03", "myrack04" ],
+                    "cnapi": "10.2.0.15"
+                }, {
+                    "name": "myregion-az3",
+                    "d42building": "MY_REGION_THREE",
+                    "d42racks": [ "myrack05", "myrack06" ],
+                    "cnapi": "10.3.0.15"
+                } ]
+            }
+        }
     }
 
 ## Synopsis
