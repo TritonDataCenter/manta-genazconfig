@@ -6,6 +6,9 @@ configuration files used to deploy a multi-datacenter
 previous tool called spc-manta-genazconfig, which was hardcoded for a particular
 deployment.
 
+For people internal to Joyent, the older (closed) tool is called
+[spc-manta-genazconfig](https://github.com/joyent/spc-manta-genazconfig).
+
 
 ## Overview
 
