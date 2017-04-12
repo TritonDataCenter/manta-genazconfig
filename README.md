@@ -1,4 +1,18 @@
+<!--
+    This Source Code Form is subject to the terms of the Mozilla Public
+    License, v. 2.0. If a copy of the MPL was not distributed with this
+    file, You can obtain one at http://mozilla.org/MPL/2.0/.
+-->
+
+<!--
+    Copyright (c) 2017, Joyent, Inc.
+-->
+
 # manta-genazconfig
+
+This repository is part of the Joyent Manta project.  For contribution
+guidelines, issues, and general documentation, visit the main
+[Manta](http://github.com/joyent/manta) project page.
 
 This tool uses data stored in a Device 42 inventory database to produce
 configuration files used to deploy a multi-datacenter
@@ -15,8 +29,8 @@ For people internal to Joyent, the older (closed) tool is called
 The terminology is a little confusing because there are a bunch of different
 stages of configuration files.
 
-    Device42 data			Triton (CNAPI) data
-      |					  |
+    Device42 data                       Triton (CNAPI) data
+      |                                   |
       | `mgenazconfig fetch-inventory`    | `mgenazconfig fetch-triton`
       |                                   | (optional)
       + <---------------------------------+
