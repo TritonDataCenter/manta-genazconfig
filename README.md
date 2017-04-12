@@ -12,19 +12,24 @@ deployment.
 The terminology is a little confusing because there are a bunch of different
 stages of configuration files.
 
-    mgenazconfig configuration + Device42 data
+    Device42 data			Triton (CNAPI) data
+      |					  |
+      | `mgenazconfig fetch-inventory`    | `mgenazconfig fetch-triton`
+      |                                   | (optional)
+      + <---------------------------------+
       |
-      | mgenazconfig
+      | `mgenazconfig gen-manta`
+      |
       v
     description of all servers in a region used for Manta,
     including each server's role
       |
-      | manta-adm genconfig --from-file
+      | `manta-adm genconfig --from-file`
       v
     Manta service layout files (one per AZ)
       |
-      | Normal Manta deployment, using the generated service layout files for
-      | "manta-adm update" (in each AZ)
+      | Normal Manta deployment process, using the generated service layout
+      | files for `manta-adm update` (in each AZ)
       v
     Deployed Manta
 
@@ -33,9 +38,9 @@ This tool itself has a configuration file that describes:
 * how to reach the Device42 endpoint
 * the list of regions (each region used for a separate Manta deployment)
 * for each region, the list of availability zones (AZs)
-* for each AZ, the name of the "building" in the Device42 database and the list
-  of rack names in the Device42 database that should be part of this Manta
-  deployment
+* for each AZ, the name of the "building" in the Device42 database, the list of
+  rack names in the Device42 database that should be part of this Manta
+  deployment, and an optional CNAPI endpoint for the AZ
 
 Here's an example configuration file for a single, eight-shard, three-AZ Manta
 deployment using two racks' worth of servers per DC:
@@ -68,15 +73,6 @@ deployment using two racks' worth of servers per DC:
 	}
     }
 
-`mgenazconfig` will take this file and:
-
-- fetch the list of servers in each of the specified buildings
-- determine the role for each server based on the hardware configuration of each
-  server
-- emit a configuration file suitable for use with `manta-adm genconfig
-  --from-file` for laying out Manta services on these servers
-
-
 ## Synopsis
 
 First, clone and build:
@@ -91,39 +87,75 @@ Now, fetch the inventory from Device42
 
     $ mgenazconfig -c /path/to/config/file fetch-inventory myregion
 
+This downloads the inventory to a directory in the current working directory
+called `mgenazconfig_data`.  You can override this with the `-d` option.
+
 Now, generate a Manta configuration:
 
     $ mgenazconfig -c /path/to/config/file gen-manta myregion
 
-This will produce output files in the current directory.
+This will produce an output file in the current directory.
 
 Once Triton has been set up, you can run additional cross-checks with data from
 CNAPI.  First, fetch the CNAPI inventory:
 
     $ mgenazconfig -c /path/to/config/file fetch-triton myregion
 
-Now, run cross-checks:
+Like `fetch-inventory`, this downloads data to `mgenazconfig_data`.
 
-    $ mgenazconfig -c /path/to/config/file verify-manta \
-        myregion /path/to/previous/output
+Now, regenerate the configuration with cross-checks:
+
+    $ mgenazconfig -c /path/to/config/file gen-manta myregion
 
 
 ## Design notes
 
-* This process should ideally work even before Triton is set up in the target
-  datacenter so that the results can be verified in parallel with Triton setup.
-* To aid in testing changes, this process should be deterministic, producing the
-  same output when the set of servers hasn't changed.
-* This tool should support an iterative process.  It should be possible to fetch
-  an updated inventory from Device42 and compare the resulting Manta
-  configuration from a previous one.
-* This tool should support a number of cross-checks to make sure that servers
-  are not accidentally assigned the wrong role.  Using data from Device42, this
-  tool can ensure that servers with the same role have the same BMC MAC address
-  OUI, indicating that they're from the same manufacturer.  Using data from
-  Triton after setup is complete, this tool can verify that all servers have the
-  same amount of DRAM.
-* Relatedly, the tool should support cross-checks for the data in Device42: that
-  serial numbers match hostnames in the way we expect.
-* Relatedly, the tool should cross-check the Device42 data with the Triton data,
-  ensuring that servers have the expected uuids, hostnames, and serial numbers.
+This process should ideally work even before Triton is set up in the target
+datacenter so that the results can be verified in parallel with Triton setup.
+In practice, we need server uuids to actually generate the configuration, and
+those aren't available until Triton is set up.  The tool currently uses serial
+numbers instead when this happens, warning the user that the file isn't directly
+useful for deployment, but can still be used to verify the overall plan.
+
+To aid in testing changes, this process should be deterministic, producing the
+same output when the set of servers hasn't changed.
+
+This tool should support an iterative process.  It should be possible to fetch
+an updated inventory from Device42 or Triton and compare the resulting Manta
+configuration from a previous one.  Right now this isn't built in, but the tool
+does save previous snapshots of the state.  In the future, it could support
+options for specifying which snapshot you want.  In the meantime, it's possible
+to diff the results by hand.
+
+This tool supports a number of cross-checks to make sure that servers are not
+accidentally assigned the wrong role.  The role is determined using the hardware
+class.  Then we verify:
+
+- that the hostname matches what we expect based on the hardware class (which
+  defines the prefix) and serial number (which defines the suffix)
+- that metadata servers all have the same amount of DRAM
+- that storage servers all have the same amount of DRAM
+
+The previous tool additionally verified rack positions, but the expected rack
+positions came from Device 42 to begin with, so that doesn't seem useful any
+more.
+
+The previous tool also used to verify BMC MAC address OUIs of metadata and
+storage nodes.  We could extend this tool to do that if this is useful.
+
+This tool also verifies:
+
+- that Triton and Device 42 agree on each server's serial number, hostname,
+  and uuid
+- that we have not selected a headnode for use by Manta
+- that all servers selected for use by Manta are marked reserved in Triton
+
+
+## Implementation notes
+
+For the list of information that this tool needs to generate for use by
+`manta-adm genconfig --from-file`, see the [manta-adm manual
+page](https://github.com/joyent/sdc-manta/blob/master/docs/man/man1/manta-adm.md#genconfig-subcommand).
+
+For information about the Device 42 API, see [the Device42 API
+reference](http://api.device42.com/).

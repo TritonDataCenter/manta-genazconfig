@@ -12,7 +12,7 @@
 
 /*
  * mgenazconfig.js: generate Manta region description for laying out Manta
- * services.
+ * services.  See README.md for details.
  */
 
 var mod_assertplus = require('assert-plus');
@@ -22,6 +22,7 @@ var mod_fs = require('fs');
 var mod_getopt = require('posix-getopt');
 var mod_jsprim = require('jsprim');
 var mod_mkdirp = require('mkdirp');
+var mod_net = require('net');
 var mod_path = require('path');
 var mod_readline = require('readline');
 var mod_stream = require('stream');
@@ -34,10 +35,12 @@ var sprintf = mod_extsprintf.sprintf;
 
 var mod_device42 = require('../lib/device42');
 var mod_schema = require('../lib/schema');
+var mod_triton = require('../lib/triton');
 
 /* Subcommands */
 var mgCmds = {
     'fetch-inventory': mgCmdFetchInventory,
+    'fetch-triton': mgCmdFetchTriton,
     'gen-manta': mgCmdGenManta
 };
 
@@ -78,7 +81,8 @@ function main()
 	    'mgo_config_region': null,
 	    'mgo_region_name': null,
 	    'mgo_password': null,
-	    'mgo_devices_by_az': null
+	    'mgo_devices_by_az': null,
+	    'mgo_cns_by_az': null
 	};
 
 	mod_cmdutil.configure({
@@ -193,12 +197,27 @@ function mgConfigRead(mgopts, callback)
 }
 
 /*
+ * mkdirp wrapper that augments error messages with context.
+ */
+function mgMkdirp(dirname, callback)
+{
+	mod_assertplus.string(dirname, 'dirname');
+	mod_assertplus.func(callback, 'callback');
+	mod_mkdirp(dirname, function (err) {
+		if (err) {
+			err = new VError(err, 'mkdirp "%s"', dirname);
+		}
+
+		callback(err);
+	});
+}
+
+/*
  * "fetch-inventory" command implementation.
  */
 function mgCmdFetchInventory(mgopts, callback)
 {
-	var regionName, funcs, tag, invroot;
-	var outfile;
+	var funcs, root;
 
 	if (mgopts.mgo_cmdargs.length === 0) {
 		mod_cmdutil.usage('expected region name');
@@ -208,48 +227,30 @@ function mgCmdFetchInventory(mgopts, callback)
 		mod_cmdutil.usage('extra arguments');
 	}
 
-	regionName = mgopts.mgo_cmdargs[0];
-	if (!mod_jsprim.hasKey(mgopts.mgo_config.regions, regionName)) {
-		callback(new VError('unknown region: "%s"', regionName));
+	if (!mgRegionArg(mgopts, callback)) {
 		return;
 	}
 
-	mgopts.mgo_region_name = regionName;
-	mgopts.mgo_config_region = mgopts.mgo_config.regions[regionName];
-
 	funcs = [];
-	tag = new Date().toISOString().slice(
-	    0, '2017-01-01T00:00:00'.length) + '.' + process.pid;
-	invroot = mod_path.join(mgopts.mgo_data_dir,
-	    'inventory', regionName, tag);
-	outfile = mod_path.join(invroot, 'devices.json');
-
+	root = mgDataDirectory(mgopts, 'inventory');
 	funcs.push(function mgInventoryDataDir(_, subcallback) {
-		mod_mkdirp(invroot, function (err) {
-			if (err) {
-				err = new VError(err, 'mkdirp "%s"', invroot);
-			}
-
-			subcallback(err);
-		});
+		mgMkdirp(root, subcallback);
 	});
 
 	funcs.push(mgPromptPassword);
 
 	mgopts.mgo_config_region.azs.forEach(function (az) {
 		funcs.push(function mgInventoryFetchOne(_, subcallback) {
-			outfile = mod_path.join(invroot,
-			    'devices-' + az.d42building + '.json');
 			mgInventoryFetchDevices({
 			    'mgopts': mgopts,
-			    'outfile': outfile,
+			    'outfile': mod_path.join(root,
+				'devices-' + az.d42building + '.json'),
 			    'building': az.d42building
 			}, subcallback);
 		});
 	});
 
 	mod_vasync.pipeline({
-	    'arg': mgopts,
 	    'funcs': funcs
 	}, function (err) {
 		callback(err);
@@ -293,6 +294,29 @@ function mgPromptPassword(mgopts, callback)
 	});
 
 	process.stdin.setRawMode(true);
+}
+
+/*
+ * Reads the first command-line argument as a region, validates it, and loads
+ * configuration into "mgopts".  This function is asynchronous to fit with the
+ * pattern of its callers.  It returns false if there was an error.
+ */
+function mgRegionArg(mgopts, callback)
+{
+	var regionName;
+
+	mod_assertplus.strictEqual(null, mgopts.mgo_region_name);
+
+	regionName = mgopts.mgo_cmdargs[0];
+	if (!mod_jsprim.hasKey(mgopts.mgo_config.regions, regionName)) {
+		setImmediate(callback,
+		    new VError('unknown region: "%s"', regionName));
+		return (false);
+	}
+
+	mgopts.mgo_region_name = regionName;
+	mgopts.mgo_config_region = mgopts.mgo_config.regions[regionName];
+	return (true);
 }
 
 function mgInventoryFetchDevices(args, callback)
@@ -350,12 +374,74 @@ function mgInventoryFetchDevices(args, callback)
 	});
 }
 
-/*
- * "gen-manta" command implementation
- */
-function mgCmdGenManta(mgopts, callback)
+function mgTritonFetchServers(args, callback)
 {
-	var regionName, dir;
+	var cnapi, outfile, servers, stream;
+
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.object(args.mgopts, 'args.mgopts');
+	mod_assertplus.string(args.cnapi, 'args.cnapi');
+	mod_assertplus.string(args.outfile, 'args.outfile');
+
+	cnapi = args.cnapi;
+	outfile = args.outfile;
+	servers = [];
+
+	log_start('fetching servers from CNAPI %s', cnapi);
+	stream = mod_triton.tritonFetchServers({
+	    'cnapiIp': cnapi
+	});
+
+	stream.on('data', function (obj) {
+		servers.push(obj);
+	});
+
+	stream.on('error', function (err) {
+		err = new VError(err,
+		    'fetching servers from CNAPI "%s"', cnapi);
+		callback(err);
+	});
+
+	stream.on('end', function () {
+		if (servers.length === 0) {
+			callback(new VError(
+			    'no servers found in CNAPI "%s"', cnapi));
+			return;
+		}
+
+		mod_fs.writeFile(outfile, JSON.stringify(servers),
+		    function (err) {
+			if (err) {
+				err = new VError(err,
+				    'write "%s"', outfile);
+			} else {
+				log_done();
+			}
+
+			callback(err);
+		    });
+	});
+}
+
+/*
+ * Returns the local path to a directory that can be used for storing a new
+ * snapshot of data having tag "tag".
+ */
+function mgDataDirectory(mgopts, tag)
+{
+	mod_assertplus.notStrictEqual(null, mgopts.mgo_region_name);
+	return (mod_path.join(mgopts.mgo_data_dir,
+	    tag, mgopts.mgo_region_name,
+	    new Date().toISOString().slice(0, '2017-01-01T00:00:00'.length) +
+	    '.' + process.pid));
+}
+
+/*
+ * "fetch-triton" command implementation.
+ */
+function mgCmdFetchTriton(mgopts, callback)
+{
+	var funcs, root;
 
 	if (mgopts.mgo_cmdargs.length === 0) {
 		mod_cmdutil.usage('expected region name');
@@ -365,24 +451,128 @@ function mgCmdGenManta(mgopts, callback)
 		mod_cmdutil.usage('extra arguments');
 	}
 
-	regionName = mgopts.mgo_cmdargs[0];
-	if (!mod_jsprim.hasKey(mgopts.mgo_config.regions, regionName)) {
-		callback(new VError('unknown region: "%s"', regionName));
+	if (!mgRegionArg(mgopts, callback)) {
 		return;
 	}
 
-	mgopts.mgo_region_name = regionName;
-	mgopts.mgo_config_region = mgopts.mgo_config.regions[regionName];
+	funcs = [];
+	root = mgDataDirectory(mgopts, 'triton');
+	funcs.push(function mgTritonDataDir(_, subcallback) {
+		mgMkdirp(root, subcallback);
+	});
 
-	dir = mod_path.join(mgopts.mgo_data_dir, 'inventory', regionName);
+	mgopts.mgo_config_region.azs.forEach(function validateAzIp(az) {
+		if (typeof (az.cnapi) != 'string' || !mod_net.isIP(az.cnapi)) {
+			mod_cmdutil.fail('region "%s", az "%s": ' +
+			    'missing or invalid CNAPI IP',
+			    mgopts.mgo_region_name, az.name);
+		}
+	});
+
+	console.error('Will contact CNAPI instances at the following IPs:');
+	mgopts.mgo_config_region.azs.forEach(function (az) {
+		fprintf(process.stderr, '    %-12s  %s\n',
+		    az.name, az.cnapi);
+		funcs.push(function fetchTritonAz(_, subcallback) {
+			mgTritonFetchServers({
+			    'mgopts': mgopts,
+			    'cnapi': az.cnapi,
+			    'outfile': mod_path.join(root,
+			        sprintf('servers-%s.json', az.name))
+			}, subcallback);
+		});
+	});
+
+	console.error('Be sure that you\'re connected to any necessary VPNs.');
+
+	mod_vasync.pipeline({
+	    'funcs': funcs
+	}, function (err) {
+		callback(err);
+	});
+}
+
+/*
+ * "gen-manta" command implementation
+ */
+function mgCmdGenManta(mgopts, callback)
+{
+	var funcs;
+
+	if (mgopts.mgo_cmdargs.length === 0) {
+		mod_cmdutil.usage('expected region name');
+	}
+
+	if (mgopts.mgo_cmdargs.length > 1) {
+		mod_cmdutil.usage('extra arguments');
+	}
+
+	if (!mgRegionArg(mgopts, callback)) {
+		return;
+	}
+
+	funcs = [];
+	funcs.push(function findLatestInventory(_, subcallback) {
+		mgopts.mgo_devices_by_az = {};
+		mgFindLatest({
+		    'mgopts': mgopts,
+		    'type': 'inventory',
+		    'process': mgParseInventory,
+		    'required': true
+		}, subcallback);
+	});
+
+	funcs.push(function findLatestTriton(_, subcallback) {
+		mgopts.mgo_cns_by_az = {};
+		mgFindLatest({
+		    'mgopts': mgopts,
+		    'type': 'triton',
+		    'process': mgParseTriton,
+		    'required': false
+		}, subcallback);
+	});
+
+	funcs.push(function genManta(_, subcallback) {
+		mgGenManta(mgopts, subcallback);
+	});
+
+	mod_vasync.pipeline({
+	    'funcs': funcs
+	}, function (err) {
+		callback(err);
+	});
+}
+
+function mgFindLatest(args, callback)
+{
+	var mgopts, type, processFunc, required;
+	var dir;
+
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.object(args.mgopts, 'args.mgopts');
+	mod_assertplus.ok(args.type == 'triton' || args.type == 'inventory');
+	mod_assertplus.func(args.process, 'args.process');
+	mod_assertplus.bool(args.required, 'args.required');
+
+	mgopts = args.mgopts;
+	type = args.type;
+	processFunc = args.process;
+	required = args.required;
+
+	dir = mod_path.join(mgopts.mgo_data_dir, type, mgopts.mgo_region_name);
 	mod_fs.readdir(dir, function (err, entries) {
 		if (err) {
 			if (err.code == 'ENOENT') {
-				err = new VError('no inventory found in ' +
-				    '"%s"', dir);
+				err = new VError('no %s data found in ' +
+				    '"%s"', type, dir);
+				if (!required) {
+					mod_cmdutil.warn(err);
+					err = null;
+				}
 			} else {
 				err = new VError(err, 'list "%s"', dir);
 			}
+
 			callback(err);
 			return;
 		}
@@ -398,95 +588,143 @@ function mgCmdGenManta(mgopts, callback)
 
 		mgFindLatestComplete({
 		    'mgopts': mgopts,
-		    'paths': entries
-		}, function (finderr) {
-			if (finderr) {
-				callback(finderr);
-				return;
-			}
-
-			mgGenManta(mgopts, callback);
+		    'paths': entries,
+		    'process': processFunc
+		}, function (processError) {
+			callback(processError);
 		});
 	});
 }
 
 function mgFindLatestComplete(args, callback)
 {
-	var mgopts, paths, path;
+	var mgopts, paths, path, processFunc;
 
 	mod_assertplus.object(args, 'args');
 	mod_assertplus.object(args.mgopts, 'args.mgopts');
 	mod_assertplus.object(args.paths, 'args.paths');
+	mod_assertplus.func(args.process, 'args.process');
 
 	mgopts = args.mgopts;
 	paths = args.paths;
 	path = paths[0];
+	processFunc = args.process;
 
 	mod_vasync.forEachParallel({
 	    'inputs': mgopts.mgo_config_region.azs,
 	    'func': function mgLoadOne(az, subcallback) {
-		var filepath;
-
-		filepath = mod_path.join(path,
-		    'devices-' + az.d42building + '.json');
-		mod_fs.readFile(filepath, function (err, contents) {
-			var parsed;
-
-			if (err) {
-				subcallback(new VError(err, 'read "%s"',
-				    filepath));
-				return;
-			}
-
-			try {
-				parsed = JSON.parse(contents);
-			} catch (ex) {
-				subcallback(new VError(ex, 'parse "%s"',
-				    filepath));
-				return;
-			}
-
-			err = mod_jsprim.validateJsonObject(
-			    mod_schema.mgSchemaD42DeviceList, parsed);
-			if (err) {
-				subcallback(new VError(err,
-				    'validate "%s"', filepath));
-				return;
-			}
-
-			subcallback(null, {
-			    'az': az.name,
-			    'devices': parsed.map(function (p) {
-				return (new mod_device42.D42Device(p));
-			    })
-			});
+		processFunc({
+		    'mgopts': mgopts,
+		    'az': az,
+		    'path': path
+		}, function (err) {
+			subcallback(err);
 		});
 	    }
-	}, function (err, results) {
+	}, function (err) {
+		/*
+		 * Note: this function was written so that it would be
+		 * easy to walk backwards to previous snapshots in order
+		 * to find the last valid one.  But it's not clear we
+		 * want to do that here -- we could end up emitting
+		 * output based on stale input and the user wouldn't
+		 * notice.  So we just fail here.  If this becomes a
+		 * problem, we could at least provide a way for users to
+		 * specify specific snapshots, and we could consider
+		 * walking back to earlier valid snapshots and emitting
+		 * a warning when that's happened.
+		 */
+		callback(err);
+	});
+}
+
+function mgParseInventory(args, callback)
+{
+	var mgopts, az, filepath;
+
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.object(args.mgopts, 'args.mgopts');
+	mod_assertplus.object(args.az, 'args.az');
+	mod_assertplus.string(args.path, 'args.path');
+
+	az = args.az;
+	mgopts = args.mgopts;
+	filepath = mod_path.join(args.path,
+	    sprintf('devices-%s.json', az.d42building));
+	mod_fs.readFile(filepath, function (err, contents) {
+		var parsed;
+
 		if (err) {
-			/*
-			 * Note: this function was written so that it would be
-			 * easy to walk backwards to previous snapshots in order
-			 * to find the last valid one.  But it's not clear we
-			 * want to do that here -- we could end up emitting
-			 * output based on stale input and the user wouldn't
-			 * notice.  So we just fail here.  If this becomes a
-			 * problem, we could at least provide a way for users to
-			 * specify specific snapshots, and we could consider
-			 * walking back to earlier valid snapshots and emitting
-			 * a warning when that's happened.
-			 */
-			callback(err);
+			callback(new VError(err, 'read "%s"', filepath));
 			return;
 		}
 
-		mgopts.mgo_devices_by_az = {};
-		results.successes.forEach(function (s) {
-			mgopts.mgo_devices_by_az[s.az] = s.devices;
+		try {
+			parsed = JSON.parse(contents);
+		} catch (ex) {
+			callback(new VError(ex, 'parse "%s"', filepath));
+			return;
+		}
+
+		err = mod_jsprim.validateJsonObject(
+		    mod_schema.mgSchemaD42DeviceList, parsed);
+		if (err) {
+			callback(new VError(err,
+			    'validate "%s"', filepath));
+			return;
+		}
+
+		mgopts.mgo_devices_by_az[az.name] = parsed.map(function (p) {
+			return (new mod_device42.D42Device(p));
 		});
 
 		callback();
 	});
+}
+
+function mgParseTriton(args, callback)
+{
+	var mgopts, az, filepath;
+
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.object(args.mgopts, 'args.mgopts');
+	mod_assertplus.object(args.az, 'args.az');
+	mod_assertplus.string(args.path, 'args.path');
+
+	az = args.az;
+	mgopts = args.mgopts;
+	filepath = mod_path.join(args.path,
+	    sprintf('servers-%s.json', az.name));
+	mod_fs.readFile(filepath, function (err, contents) {
+		var parsed;
+
+		if (err) {
+			callback(new VError(err, 'read "%s"', filepath));
+			return;
+		}
+
+		try {
+			parsed = JSON.parse(contents);
+		} catch (ex) {
+			callback(new VError(ex, 'parse "%s"', filepath));
+			return;
+		}
+
+		err = mod_jsprim.validateJsonObject(
+		    mod_schema.mgSchemaTritonServerList, parsed);
+		if (err) {
+			callback(new VError(err,
+			    'validate "%s"', filepath));
+			return;
+		}
+
+		mgopts.mgo_cns_by_az[az.name] = parsed.map(function (p) {
+			return (new mod_triton.TritonServer(p));
+		});
+
+		callback();
+	});
+
 }
 
 function mgGenManta(mgopts, callback)
@@ -665,7 +903,7 @@ function mgGenManta(mgopts, callback)
 		printf('    %-10s  %9s  %9s\n\n', 'TOTAL', nmetadata, nstorage);
 	});
 
-	warnings = mgGenMantaCrossCheck(mgopts, rv, counters);
+	warnings = mgGenMantaCrossCheck(mgopts, rv, usedSerials, counters);
 	mgGenMantaSummarize(mgopts, warnings, counters);
 
 	/*
@@ -683,9 +921,10 @@ function mgGenManta(mgopts, callback)
  * Run additional cross-checks using whatever data we have.  Returns an array of
  * warnings.
  */
-function mgGenMantaCrossCheck(mgopts, result, counters)
+function mgGenMantaCrossCheck(mgopts, result, servers, counters)
 {
-	var warnings, attrs;
+	var warnings, attrs, allserversBySerial;
+	var tritonMissing = false;
 
 	warnings = [];
 
@@ -755,14 +994,81 @@ function mgGenMantaCrossCheck(mgopts, result, counters)
 	});
 
 	/*
-	 * TODO implement Triton data source and cross-checks.
-	 * cross-checks:
-	 * - D42 and Triton match on hostname, uuid, serial, DRAM.
-	 * - headnode not used
-	 * - all used servers are reserved
+	 * Now cross-check our allocation with information provided by Triton.
 	 */
-	warnings.push(new VError('Triton data is not present.  Some cross-' +
-	    'checks have been skipped.'));
+	allserversBySerial = {};
+	mgopts.mgo_config_region.azs.forEach(function (az) {
+		var azservers;
+
+		if (!mod_jsprim.hasKey(mgopts.mgo_cns_by_az, az.name)) {
+			tritonMissing = true;
+			return;
+		}
+
+		azservers = mgopts.mgo_cns_by_az[az.name];
+		azservers.forEach(function (ts) {
+			if (mod_jsprim.hasKey(
+			    allserversBySerial, ts.ts_serial)) {
+				warnings.push(new VError('multiple servers ' +
+				    'found in Triton data having serial "%s"',
+				    ts.ts_serial));
+				return;
+			}
+
+			allserversBySerial[ts.ts_serial] = ts;
+		});
+	});
+
+	if (tritonMissing) {
+		warnings.push(new VError('Triton data is incomplete or ' +
+		    'missing.  Triton cross-checks have been skipped.'));
+		return (warnings);
+	}
+
+	mod_jsprim.forEachKey(servers, function (serial, device) {
+		var server, delta;
+
+		if (!mod_jsprim.hasKey(allserversBySerial, serial)) {
+			warnings.push(new VError('server %s: not found in ' +
+			    'Triton data'));
+			return;
+		}
+
+		server = allserversBySerial[serial];
+		mod_assertplus.equal(server.ts_serial, serial);
+		mod_assertplus.equal(server.ts_serial, device.d42d_serial);
+
+		delta = Math.abs(server.ts_ram - (device.d42d_ramgb * 1024));
+		if (delta / server.ts_ram > 0.01) {
+			warnings.push(new VError('server %s: Triton reports ' +
+			    '%sMB of DRAM, but Device42 reports %sMB',
+			    serial, server.ts_ram, device.d42d_ramgb * 1024));
+		}
+
+		if (server.ts_hostname != device.d42d_name) {
+			warnings.push(new VError('server %s: Triton reports ' +
+			    'hostname %s, but Device42 reports %s',
+			    serial, server.ts_hostname, device.d42d_name));
+		}
+
+		if (device.d42d_uuid !== null &&
+		    server.ts_uuid != device.d42d_uuid) {
+			warnings.push(new VError('server %s: Triton reports ' +
+			    'uuid %s, but Device42 reports %s',
+			    serial, server.ts_uuid, device.d42d_uuid));
+		}
+
+		if (server.ts_headnode) {
+			warnings.push(new VError('server %s: is a Triton ' +
+			    'headnode', serial));
+		}
+
+		if (!server.ts_reserved) {
+			warnings.push(new VError('server %s: is not reserved',
+			    serial));
+		}
+	});
+
 	return (warnings);
 }
 
