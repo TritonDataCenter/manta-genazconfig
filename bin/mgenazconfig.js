@@ -744,6 +744,7 @@ function mgGenManta(mgopts, callback)
 	counters = {
 	    'nUnknownHw': 0,
 	    'nUnknownRack': 0,
+	    'nUnracked': 0,
 	    'nMetadata': 0,
 	    'nStorage': 0,
 	    'nMissingUuid': 0,
@@ -781,12 +782,25 @@ function mgGenManta(mgopts, callback)
 
 			/*
 			 * We got this list by querying Device 42 for devices in
-			 * this building.  We should validate this earlier, but
-			 * it would be strange if we got a device in a different
-			 * building.
+			 * this building.  That said, in some cases, Device 42
+			 * returns devices matching a "building" query when the
+			 * devices themselves have no "building" field.  We
+			 * ignore that case.  Here, we're asserting that we
+			 * didn't get something in a wrong building.  We should
+			 * validate this earlier, but it would be strange if we
+			 * got a device in a different building.
 			 */
-			mod_assertplus.equal(
-			    device.d42d_building, az.d42building);
+			mod_assertplus.ok(device.d42d_building === null ||
+			    device.d42d_building == az.d42building);
+
+			/*
+			 * Some servers have no rack, however.  We skip these.
+			 */
+			if (device.d42d_rack === null) {
+				counters['nUnracked']++;
+				return;
+			}
+
 			if (!mod_jsprim.hasKey(racks, device.d42d_rack)) {
 				counters['nUnknownRack']++;
 				return;
@@ -1088,6 +1102,8 @@ function mgGenMantaSummarize(mgopts, warnings, counters)
 	    counters['nUnknownRack']);
 	printf('%-38s  %5d\n', 'ignored: devices on non-Manta hardware',
 	    counters['nUnknownHw']);
+	printf('%-38s  %5d\n', 'ignored: no rack assigned',
+	    counters['nUnracked']);
 
 	printf('%-38s  %5d\n', 'servers with unknown "ram"',
 	    counters['nMissingRam']);
