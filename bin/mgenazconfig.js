@@ -88,7 +88,9 @@ function main()
 	mod_cmdutil.configure({
 	    'usageMessage': 'generate Manta region description file',
 	    'synopses': [
-	        '[GLOBAL_OPTIONS] fetch-inventory REGION'
+	        '[-c CONFIG_FILE] [-d DATA_DIR] fetch-inventory REGION',
+	        '[-c CONFIG_FILE] [-d DATA_DIR] fetch-triton REGION',
+	        '[-c CONFIG_FILE] [-d DATA_DIR] gen-manta REGION'
 	    ]
 	});
 
@@ -251,6 +253,7 @@ function mgCmdFetchInventory(mgopts, callback)
 	});
 
 	mod_vasync.pipeline({
+	    'arg': mgopts,
 	    'funcs': funcs
 	}, function (err) {
 		callback(err);
