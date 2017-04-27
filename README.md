@@ -35,6 +35,16 @@ stages of configuration files.
       |                                   | (optional)
       + <---------------------------------+
       |
+      | `mgenazconfig gen-manta-net`
+      |
+    configuration for server networking and required Manta
+    networks in a region
+      |
+      | `manta-net.sh` (in each AZ)
+      |
+      V
+    Manta-specific networking configured
+      |
       | `mgenazconfig gen-manta`
       |
       v
@@ -50,6 +60,10 @@ stages of configuration files.
       v
     Deployed Manta
 
+The configuration files from `mgenazconfig gen-manta` and
+`mgenazconfig gen-manta-net` can be generated in parallel, but the above is the
+general workflow when deploying Manta.
+
 This tool itself has a configuration file that describes:
 
 * how to reach the Device42 endpoint
@@ -58,6 +72,10 @@ This tool itself has a configuration file that describes:
 * for each AZ, the name of the "building" in the Device42 database, the list of
   rack names in the Device42 database that should be part of this Manta
   deployment, and an optional CNAPI endpoint for the AZ
+* optionally, for each AZ, a description of the intended networking
+  configuration (see the
+  [Additional `gen-manta-net` configuration](#additional-gen-manta-net-configuration)
+  section)
 
 Here's an example configuration file for a single, eight-shard, three-AZ Manta
 deployment using two racks' worth of servers per DC:
@@ -107,11 +125,18 @@ Now, fetch the inventory from Device42
 This downloads the inventory to a directory in the current working directory
 called `mgenazconfig_data`.  You can override this with the `-d` option.
 
-Now, generate a Manta configuration:
+Now, generate a Manta configuration suitable for use by `manta-adm genconfig`:
 
     $ mgenazconfig -c /path/to/config/file gen-manta myregion
 
 This will produce an output file in the current directory.
+
+To generate Manta networking configuration suitable for use by `manta-net.sh`,
+use the following:
+
+    $ mgenazconfig -c /path/to/config/file gen-manta-net myregion.
+
+This will produce an output file per AZ in the region.
 
 Once Triton has been set up, you can run additional cross-checks with data from
 CNAPI.  First, fetch the CNAPI inventory:
@@ -123,6 +148,50 @@ Like `fetch-inventory`, this downloads data to `mgenazconfig_data`.
 Now, regenerate the configuration with cross-checks:
 
     $ mgenazconfig -c /path/to/config/file gen-manta myregion
+
+
+## Additional `gen-manta-net` configuration
+
+This piece of configuration is optional to allow `gen-manta` to be used prior to
+networking information being known. To make use of the `gen-manta-net`
+subcommand the following configuration additions must be made.
+
+* In the list of AZs for a region, a "networking" object must be added that
+  contains NAPI network and NIC mapping information for the "admin", "manta",
+  and "mantanat" network. For example:
+
+      ...
+      }, {
+      "name": "east1c",
+          ...
+          "networking": {
+              "admin": {
+                  "network": {
+                      "name": "admin",
+                      "nic_tag": "admin",
+                      "subnet": "10.99.99.0/24",
+                      "gateway": "10.99.99.1",
+                      "provision_start_ip": "10.99.99.38",
+                      "provision_end_ip": "10.99.99.253",
+                      "vlan_id": 0
+                  },
+                  "nic_mapping": "aggr1"
+              },
+              "manta": {
+                  "network": {
+                  ...
+      ...
+
+The "nic_mapping" value is assumed to be an aggregation name unless the
+special value of `<mac>` is used. When `<mac>` is used, the resulting
+configuration file will contain placeholder values (`$server_uuid-MAC"`) that
+need to be replaced with the appropriate MAC address for that server's "manta"
+and "mantanat" network.
+
+The per-network "nic_mapping" value is also assumed to be the same value across
+all servers in the AZ. That is, if you require a subset of storage servers to
+have a different aggregation tagged for "manta" usage, the resulting
+configuration file must be edited to reflect this.
 
 
 ## Design notes
@@ -173,6 +242,10 @@ This tool also verifies:
 For the list of information that this tool needs to generate for use by
 `manta-adm genconfig --from-file`, see the [manta-adm manual
 page](https://github.com/joyent/sdc-manta/blob/master/docs/man/man1/manta-adm.md#genconfig-subcommand).
+
+For information on the networking configuration file used by `manta-net.sh`, see
+the [operator guide]
+(https://github.com/joyent/manta/blob/master/docs/operator-guide/index.md#networking-configuration).
 
 For information about the Device 42 API, see [the Device42 API
 reference](http://api.device42.com/).
