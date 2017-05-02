@@ -1063,13 +1063,6 @@ function mgGenMantaNet(mgopts, callback)
 		mgopts.mgo_devices_by_az[az.name].forEach(function (device) {
 			var type, uuid;
 
-			if (device.d42d_uuid === null) {
-				uuid = device.d42d_serial;
-				counters_az['nMissingUuid']++;
-			} else {
-				uuid = device.d42d_uuid;
-			}
-
 			if (racks.indexOf(device.d42d_rack) < 0)
 				return;
 
@@ -1077,6 +1070,13 @@ function mgGenMantaNet(mgopts, callback)
 			    !mod_jsprim.hasKey(mgHardwareToServerType,
 			    device.d42d_hardware))
 				return;
+
+			if (device.d42d_uuid === null) {
+				uuid = device.d42d_serial;
+				counters_az['nMissingUuid']++;
+			} else {
+				uuid = device.d42d_uuid;
+			}
 
 			type = mgHardwareToServerType[device.d42d_hardware];
 			if (type !== 'storage' && type !== 'metadata')
